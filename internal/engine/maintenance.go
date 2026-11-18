@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"lamina/internal/index"
 	"lamina/internal/journal"
+	"lamina/internal/query"
 	"lamina/internal/snapshot"
-	"lamina/internal/versions"
 	"os"
 	"path/filepath"
 )
@@ -70,14 +70,27 @@ func Restore(dir string, data []byte) error {
 	installed = true
 	return nil
 }
-func (d *DB) Vacuum(requested uint64) (versions.VacuumResult, error) {
+
+// VacuumReport is the maintenance-side observation marker: it states the basis
+// the reclamation was applied at, so its effect can be matched against query
+// and diagnosis observations instead of being silently merged with them.
+type VacuumReport struct {
+	Horizon      uint64      `json:"horizon"`
+	Removed      int         `json:"removed"`
+	Retained     int         `json:"retained"`
+	Pinned       bool        `json:"pinned"`
+	IndexRebuilt bool        `json:"index_rebuilt"`
+	Basis        query.Basis `json:"basis"`
+}
+
+func (d *DB) Vacuum(requested uint64) (VacuumReport, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.usable(); err != nil {
-		return versions.VacuumResult{}, err
+		return VacuumReport{}, err
 	}
 	if requested > d.sequence || requested < d.horizon {
-		return versions.VacuumResult{}, fault("invalid", "vacuum horizon outside retained interval")
+		return VacuumReport{}, fault("invalid", "vacuum horizon outside retained interval")
 	}
 	horizon := requested
 	for _, tx := range d.transactions {
@@ -85,12 +98,12 @@ func (d *DB) Vacuum(requested uint64) (versions.VacuumResult, error) {
 			horizon = tx.Snapshot
 		}
 	}
-	beforeKeys, beforeVersions := d.store.Count()
-	_ = beforeKeys
+	_, beforeVersions := d.store.Count()
 	if err := d.publish(journal.Record{Kind: "vacuum", Horizon: horizon}); err != nil {
-		return versions.VacuumResult{}, err
+		return VacuumReport{}, err
 	}
 	_, remaining := d.store.Count()
 	d.indexes = index.Build(d.catalog, d.store)
-	return versions.VacuumResult{Horizon: horizon, Removed: beforeVersions - remaining, Retained: remaining, Pinned: horizon < requested}, nil
+	d.epoch++
+	return VacuumReport{Horizon: horizon, Removed: beforeVersions - remaining, Retained: remaining, Pinned: horizon < requested, IndexRebuilt: true, Basis: d.basis()}, nil
 }

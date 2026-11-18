@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded production walkthroughs using only the public HTTP service."""
 import argparse, concurrent.futures, json, os, pathlib, shutil, socket, subprocess, tempfile, time, urllib.request, urllib.error
-WORKFLOWS=['catalog-create','txn-write','snapshot-read','index-build','query-plan','sql-execute','txn-conflict','restart','checkpoint','backup-restore','changes','vacuum','transaction-close','statistics']
+WORKFLOWS=['catalog-create','txn-write','snapshot-read','index-build','query-plan','sql-execute','txn-conflict','restart','checkpoint','backup-restore','changes','vacuum','transaction-close','statistics','query-diagnosis']
 class Session:
  def __init__(self,binary,root,restore=None):
   self.binary=str(binary);self.root=pathlib.Path(root);self.restore=restore;self.process=None;self.log=None
@@ -151,7 +151,75 @@ def walkthrough(name,binary):
     s.call('POST','/indexes',{'name':'by_amp','relation':'spectra','column':'amplitude'},201)
     q=s.query(where=[{'column':'amplitude','op':'>=','value':40}],limit=2)
     require(q['matched']==3 and q['scanned']==3 and len(q['rows'])==2 and q['truncated'],'query fact meanings conflated')
-    observations={'query':q,'stats':s.stats()}
+    require(q['work']['probes']==3 and q['work']['visible']==3 and q['work']['dead']==0,'measured work not reported')
+    require(q['basis']['sequence']==q['plan']['snapshot'] and q['basis']['epoch']==1,'observation basis missing')
+    scan=s.query(where=[{'column':'amplitude','op':'>=','value':40}],force_scan=True)
+    require(scan['work']['probes']==7 and scan['work']['visible']==7 and scan['matched']==3,'scan work not measured')
+    observations={'query':q,'scan':scan,'stats':s.stats()}
+   elif name=='query-diagnosis':
+    def diagnose(**kwargs):
+     d=s.call('POST','/diagnoses',{'relation':'spectra',**kwargs},201)
+     while d['status']=='probing':d=s.call('POST',f"/diagnoses/{d['id']}/probe",{})
+     return d
+    def close(d):s.call('POST',f"/diagnoses/{d['id']}/close",{})
+    s.call('POST','/indexes',{'name':'by_amp','relation':'spectra','column':'amplitude'},201)
+    fresh=diagnose(where=[{'column':'amplitude','op':'>=','value':40}],compare=True)
+    require(fresh['status']=='complete' and fresh['measured'][0]['dead']==0,'fresh trajectory shows dead work')
+    require(fresh['measured'][0]['probes']==3 and fresh['measured'][1]['path']=='scan' and fresh['measured'][1]['probes']==7,'path evidence missing')
+    require(fresh['recommendation']['action']!='vacuum','fresh data blamed on history')
+    require(fresh['estimated']['candidates']==3 and fresh['estimated']['chains']==7,'estimate section wrong')
+    close(fresh)
+    for cycle in range(6):
+     tx=s.begin()
+     for n in range(1,7):s.put(tx,tuple_(n,amplitude=10 if cycle%2 else 90))
+     s.commit(tx)
+    tx=s.begin()
+    for n in (5,6):s.call('POST',f'/transactions/{tx}/delete',{'relation':'spectra','key':n})
+    s.commit(tx)
+    light=s.query(where=[{'column':'amplitude','op':'>=','value':40}])
+    require(light['work']['dead']==2 and light['work']['version_steps']>light['work']['probes'],'lightweight facts hide churn cost')
+    churn=diagnose(where=[{'column':'amplitude','op':'>=','value':40}],chunk=4)
+    chosen=churn['measured'][0]
+    require(churn['status']=='complete' and chosen['dead']==2 and chosen['reclaimable_versions']>0,'churn evidence missing')
+    require(len(chosen['hot_keys'])==6 and chosen['chain_depths']['5_16']==6,'bounded hot evidence wrong')
+    require(churn['unattributable']['dead_candidates']==2,'unattributable section missing')
+    rec=churn['recommendation']
+    require(rec['action']=='vacuum' and rec['basis']==churn['basis'],'churn did not schedule maintenance on its own basis')
+    close(churn)
+    vac=s.call('POST','/vacuum',{'horizon':rec['horizon']})
+    require(vac['index_rebuilt'] and vac['basis']['horizon']==rec['horizon'] and vac['removed']==chosen['reclaimable_versions'],'vacuum projection and operation diverged')
+    after=diagnose(where=[{'column':'amplitude','op':'>=','value':40}])
+    require(after['basis']!=churn['basis'] and after['measured'][0]['dead']==0 and after['measured'][0]['probes']==0,'recommended vacuum not verifiable')
+    require(after['recommendation']['action']=='none','maintenance still urged after reclamation')
+    close(after)
+    tx=s.begin();s.put(tx,tuple_(8))
+    mixed=s.call('POST','/diagnoses',{'relation':'spectra','where':[{'column':'amplitude','op':'>=','value':0}],'chunk':1},201)
+    require(mixed['status']=='probing','diagnosis should span multiple chunks')
+    s.commit(tx)
+    mixed=s.call('POST',f"/diagnoses/{mixed['id']}/probe",{})
+    require(mixed['status']=='mixed_basis' and mixed.get('recommendation') is None and mixed['recommendation_blocked'],'commit mid-diagnosis still produced advice')
+    require(mixed['current_basis']['sequence']==mixed['basis']['sequence']+1,'basis drift not marked')
+    close(mixed)
+    tx=s.begin();s.put(tx,tuple_(9));s.commit(tx);head=s.stats()['sequence']
+    lost=s.call('POST','/diagnoses',{'relation':'spectra','at':head-1,'where':[{'column':'amplitude','op':'>=','value':0}],'chunk':1},201)
+    s.call('POST','/vacuum',{'horizon':head})
+    lost=s.call('POST',f"/diagnoses/{lost['id']}/probe",{})
+    require(lost['status']=='snapshot_lost' and lost.get('recommendation') is None,'reclaimed snapshot diagnosis continued')
+    close(lost)
+    tx=s.begin()
+    for n in range(10,59):s.put(tx,tuple_(n,amplitude=95))
+    s.commit(tx)
+    bounded=diagnose(where=[{'column':'amplitude','op':'>=','value':40}],budget=8,chunk=3)
+    require(bounded['status']=='budget_exhausted' and bounded.get('recommendation') is None,'partial coverage recommended')
+    require(bounded['measured'][0]['queued']==8 and bounded['measured'][0]['total']==51,'queue not bounded by budget')
+    require(len(bounded['measured'][0]['hot_keys'])<=16,'hot key evidence unbounded')
+    close(bounded)
+    ids=[]
+    for _ in range(8):ids.append(s.call('POST','/diagnoses',{'relation':'spectra'},201)['id'])
+    s.call('POST','/diagnoses',{'relation':'spectra'},429)
+    for i in ids:s.call('POST',f'/diagnoses/{i}/close',{})
+    require(s.stats()['diagnoses_active']==0,'closed diagnoses still counted')
+    observations={'fresh':fresh,'churn':churn,'vacuum':vac,'after':after,'mixed':mixed,'lost':lost,'bounded':bounded}
    else:raise ValueError(name)
    return {'workflow':name,'status':'observed','observations':observations}
   finally:

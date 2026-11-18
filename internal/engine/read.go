@@ -3,6 +3,7 @@ package engine
 import (
 	"lamina/internal/datum"
 	"lamina/internal/query"
+	"lamina/internal/versions"
 )
 
 func (d *DB) Query(q query.Request) (query.Result, error) {
@@ -43,19 +44,26 @@ func (d *DB) Query(q query.Request) (query.Result, error) {
 	}
 	plan, keys := query.Choose(d.catalog, d.indexes, q, at, len(d.store.Tables[q.Relation]))
 	rows := map[string]datum.Row{}
+	var walk versions.Walk
 	if plan.Access == "index" {
 		for _, key := range keys {
-			if row, exists := d.store.Read(q.Relation, key, at); exists {
-				rows[key] = row
+			probe := d.store.ProbeKey(q.Relation, key, at)
+			walk.Probes++
+			walk.Steps += probe.Steps
+			if probe.Visible {
+				walk.Visible++
+				rows[key] = probe.Row
 			}
 		}
 	} else {
-		rows = d.store.Scan(q.Relation, at)
+		rows, walk = d.store.ScanWork(q.Relation, at)
 	}
 	if tx != nil {
 		overlay(rows, tx.writes, q.Relation)
 	}
 	result, err := query.Execute(r, q, rows, plan, keys)
+	result.Work = query.Work{Probes: walk.Probes, Visible: walk.Visible, Dead: walk.Probes - walk.Visible, VersionSteps: walk.Steps}
+	result.Basis = d.basis()
 	d.queries++
 	if err != nil {
 		return result, invalid(err)

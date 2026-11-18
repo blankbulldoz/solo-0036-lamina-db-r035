@@ -71,5 +71,6 @@ func (d *DB) CreateIndex(i catalog.Index) (catalog.Index, error) {
 		return i, err
 	}
 	d.indexes = index.Build(d.catalog, d.store)
+	d.epoch++
 	return i, nil
 }

@@ -33,9 +33,33 @@ type Plan struct {
 	Snapshot   uint64 `json:"snapshot"`
 	Residuals  int    `json:"residuals"`
 }
+
+// Work is the measured store-side cost of one execution. It exists so that
+// plan.candidates (a planning-time access-path fact) is never mistaken for
+// the actual read volume: probes counts version chains visited, dead counts
+// probes with no visible row at the snapshot, and version_steps counts the
+// chain search iterations, which grow with retained history.
+type Work struct {
+	Probes       int `json:"probes"`
+	Visible      int `json:"visible"`
+	Dead         int `json:"dead"`
+	VersionSteps int `json:"version_steps"`
+}
+
+// Basis marks what an observation was made against: the commit head, the
+// retained-history floor, and the access-path generation (bumped by index
+// creation and vacuum rebuilds). Two results are only directly comparable
+// when their bases match; epoch resets when the process reopens.
+type Basis struct {
+	Sequence uint64 `json:"sequence"`
+	Horizon  uint64 `json:"horizon"`
+	Epoch    uint64 `json:"epoch"`
+}
 type Result struct {
 	Rows      []datum.Row `json:"rows"`
 	Plan      Plan        `json:"plan"`
+	Work      Work        `json:"work"`
+	Basis     Basis       `json:"basis"`
 	Scanned   int         `json:"scanned"`
 	Matched   int         `json:"matched"`
 	Truncated bool        `json:"truncated"`

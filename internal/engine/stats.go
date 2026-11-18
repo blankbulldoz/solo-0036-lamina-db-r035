@@ -5,7 +5,9 @@ import "sort"
 type Stats struct {
 	Sequence       uint64         `json:"sequence"`
 	Horizon        uint64         `json:"horizon"`
+	Epoch          uint64         `json:"epoch"`
 	Active         []Transaction  `json:"active"`
+	Diagnoses      int            `json:"diagnoses_active"`
 	Keys           int            `json:"keys"`
 	Versions       int            `json:"versions"`
 	IndexEntries   map[string]int `json:"index_entries"`
@@ -24,7 +26,7 @@ func (d *DB) Stats() (Stats, error) {
 		return Stats{}, err
 	}
 	keys, versions := d.store.Count()
-	s := Stats{Sequence: d.sequence, Horizon: d.horizon, Keys: keys, Versions: versions, Active: []Transaction{}, IndexEntries: map[string]int{}, JournalRecords: len(d.wal.Records), HistoryBase: d.wal.Base, RecoveredTail: d.wal.RecoveredTail, Commits: d.commits, Conflicts: d.conflicts, Queries: d.queries}
+	s := Stats{Sequence: d.sequence, Horizon: d.horizon, Epoch: d.epoch, Keys: keys, Versions: versions, Active: []Transaction{}, Diagnoses: len(d.diagnoses), IndexEntries: map[string]int{}, JournalRecords: len(d.wal.Records), HistoryBase: d.wal.Base, RecoveredTail: d.wal.RecoveredTail, Commits: d.commits, Conflicts: d.conflicts, Queries: d.queries}
 	for _, tx := range d.transactions {
 		copy := *tx
 		copy.writes = nil

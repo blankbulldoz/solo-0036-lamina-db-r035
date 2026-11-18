@@ -5,6 +5,7 @@ import (
 	"lamina/internal/catalog"
 	"lamina/internal/index"
 	"lamina/internal/journal"
+	"lamina/internal/query"
 	"lamina/internal/snapshot"
 	"lamina/internal/versions"
 	"os"
@@ -21,7 +22,9 @@ type DB struct {
 	wal          *journal.WAL
 	sequence     uint64
 	horizon      uint64
+	epoch        uint64
 	transactions map[string]*Transaction
+	diagnoses    map[string]*Diagnosis
 	closed       bool
 	commits      uint64
 	conflicts    uint64
@@ -47,7 +50,7 @@ func Open(dir string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &DB{dir: absolute, catalog: catalog.New(), store: versions.New(), wal: w, transactions: map[string]*Transaction{}}
+	d := &DB{dir: absolute, catalog: catalog.New(), store: versions.New(), wal: w, transactions: map[string]*Transaction{}, diagnoses: map[string]*Diagnosis{}}
 	if !missing {
 		d.catalog = image.Catalog
 		d.store = image.Store
@@ -94,7 +97,16 @@ func (d *DB) Close() error {
 	}
 	d.closed = true
 	d.transactions = map[string]*Transaction{}
+	d.diagnoses = map[string]*Diagnosis{}
 	return d.wal.Close()
+}
+
+// basis captures the observation marker every query, diagnosis and
+// maintenance result is stamped with. Any commit, vacuum or index change
+// moves at least one field, so consumers can detect when two observations
+// must not be combined into one conclusion.
+func (d *DB) basis() query.Basis {
+	return query.Basis{Sequence: d.sequence, Horizon: d.horizon, Epoch: d.epoch}
 }
 func (d *DB) publish(r journal.Record) error {
 	r.Sequence = d.sequence + 1
